@@ -2,12 +2,12 @@ name: Tests
 
 on:
   push:
-    branches: [main, ethie/slice-test-5]
+    branches: [main, ethie/slice-test-4]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
   pull_request:
-    branches: [main]
+    branches: [main, ethie/slice-test-5]
     paths-ignore:
       - '**/*.md'
       - 'docs/**'
