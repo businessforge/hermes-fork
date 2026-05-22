@@ -1,0 +1,27 @@
+name: Sync Upstream
+
+# NOTE 2026-05-22: Sister forks (openclaw-fork, paperclip-fork) have been
+# failing for ~4+ consecutive weeks with "Upstream commits contain workflow
+# changes, which require the `workflow` scope or permission to merge."
+# Root cause: default GITHUB_TOKEN lacks `workflow` scope; when upstream
+# touches .github/workflows/* the sync aborts. This workflow is ported
+# as-is for parity with the dormant-insurance fleet. Fix tracked separately
+# (would need a PAT secret with workflow scope, or workflow-aware sync logic).
+
+on:
+  schedule:
+    # Weekly on Monday at 09:00 UTC (~2 AM Pacific)
+    - cron: '0 9 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Sync fork with upstream default branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh repo sync ${{ github.repository }}
