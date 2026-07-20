@@ -1165,13 +1165,39 @@ class TestBedrockErrorClassification:
 class TestBedrockContextLength:
     """Test Bedrock model context length lookup."""
 
+    def test_claude_opus_4_8(self):
+        from agent.bedrock_adapter import get_bedrock_context_length
+        # Opus 4.8 exposes the 1M window on Bedrock (matches native Anthropic).
+        assert get_bedrock_context_length("anthropic.claude-opus-4-8-20250514-v1:0") == 1_000_000
+
+    def test_claude_opus_4_7(self):
+        from agent.bedrock_adapter import get_bedrock_context_length
+        # Opus 4.7 has 1M context generally available (no beta header required)
+        # per https://platform.claude.com/docs/en/about-claude/models/overview
+        assert get_bedrock_context_length("anthropic.claude-opus-4-7") == 1_000_000
+
     def test_claude_opus_4_6(self):
         from agent.bedrock_adapter import get_bedrock_context_length
-        assert get_bedrock_context_length("anthropic.claude-opus-4-6-20250514-v1:0") == 200_000
+        # Opus 4.6 has 1M context generally available (no beta header required).
+        assert get_bedrock_context_length("anthropic.claude-opus-4-6-20250514-v1:0") == 1_000_000
 
     def test_claude_sonnet_versioned(self):
         from agent.bedrock_adapter import get_bedrock_context_length
-        assert get_bedrock_context_length("anthropic.claude-sonnet-4-6-20250514-v1:0") == 200_000
+        # Sonnet 4.6 has 1M context generally available (no beta header required).
+        assert get_bedrock_context_length("anthropic.claude-sonnet-4-6-20250514-v1:0") == 1_000_000
+
+    def test_claude_sonnet_4_5_is_200k(self):
+        from agent.bedrock_adapter import get_bedrock_context_length
+        # Sonnet 4.5's 1M beta was retired on April 30, 2026;
+        # it is now standard 200K.
+        # https://platform.claude.com/docs/en/release-notes/overview
+        assert get_bedrock_context_length("anthropic.claude-sonnet-4-5-20250514-v1:0") == 200_000
+
+    def test_claude_haiku_4_5_is_200k(self):
+        from agent.bedrock_adapter import get_bedrock_context_length
+        # Haiku 4.5 has no 1M window — must stay at the 200K Bedrock limit and
+        # not get swept up by the opus/sonnet bump.
+        assert get_bedrock_context_length("anthropic.claude-haiku-4-5-20251001-v1:0") == 200_000
 
     def test_nova_pro(self):
         from agent.bedrock_adapter import get_bedrock_context_length
@@ -1187,8 +1213,9 @@ class TestBedrockContextLength:
 
     def test_inference_profile_resolves(self):
         from agent.bedrock_adapter import get_bedrock_context_length
-        # Cross-region inference profiles contain the base model ID
-        assert get_bedrock_context_length("us.anthropic.claude-sonnet-4-6") == 200_000
+        # Cross-region inference profiles contain the base model ID.
+        # Sonnet 4.6 is 1M, so a 'us.' profile of it should also resolve to 1M.
+        assert get_bedrock_context_length("us.anthropic.claude-sonnet-4-6") == 1_000_000
 
     def test_longest_prefix_wins(self):
         from agent.bedrock_adapter import get_bedrock_context_length
@@ -1305,26 +1332,44 @@ class TestIsAnthropicBedrockModel:
 
 
 class TestEmptyTextBlockFix:
-    """Test that empty text blocks are replaced with space placeholders."""
+    """Test that empty/whitespace-only text blocks are replaced with a
+    non-whitespace placeholder (not a literal space, which is itself
+    whitespace and gets rejected by the same Bedrock validation rule)."""
 
-    def test_none_content_gets_space(self):
-        from agent.bedrock_adapter import _convert_content_to_converse
+    def test_none_content_gets_placeholder(self):
+        from agent.bedrock_adapter import _convert_content_to_converse, _EMPTY_TEXT_PLACEHOLDER
         blocks = _convert_content_to_converse(None)
-        assert blocks[0]["text"] == " "
+        assert blocks[0]["text"] == _EMPTY_TEXT_PLACEHOLDER
+        assert blocks[0]["text"].strip()
 
-    def test_empty_string_gets_space(self):
-        from agent.bedrock_adapter import _convert_content_to_converse
+    def test_empty_string_gets_placeholder(self):
+        from agent.bedrock_adapter import _convert_content_to_converse, _EMPTY_TEXT_PLACEHOLDER
         blocks = _convert_content_to_converse("")
-        assert blocks[0]["text"] == " "
+        assert blocks[0]["text"] == _EMPTY_TEXT_PLACEHOLDER
+        assert blocks[0]["text"].strip()
 
-    def test_whitespace_only_gets_space(self):
-        from agent.bedrock_adapter import _convert_content_to_converse
+    def test_whitespace_only_gets_placeholder(self):
+        from agent.bedrock_adapter import _convert_content_to_converse, _EMPTY_TEXT_PLACEHOLDER
         blocks = _convert_content_to_converse("   ")
-        assert blocks[0]["text"] == " "
+        assert blocks[0]["text"] == _EMPTY_TEXT_PLACEHOLDER
+        assert blocks[0]["text"].strip()
 
     def test_real_text_preserved(self):
         from agent.bedrock_adapter import _convert_content_to_converse
         blocks = _convert_content_to_converse("Hello")
+        assert blocks[0]["text"] == "Hello"
+
+    def test_whitespace_only_list_string_item_gets_placeholder(self):
+        """Regression: plain string items inside a content list (not
+        {"type": "text"} dicts) must also be routed through _safe_text()."""
+        from agent.bedrock_adapter import _convert_content_to_converse, _EMPTY_TEXT_PLACEHOLDER
+        blocks = _convert_content_to_converse(["   "])
+        assert blocks[0]["text"] == _EMPTY_TEXT_PLACEHOLDER
+        assert blocks[0]["text"].strip()
+
+    def test_real_list_string_item_preserved(self):
+        from agent.bedrock_adapter import _convert_content_to_converse
+        blocks = _convert_content_to_converse(["Hello"])
         assert blocks[0]["text"] == "Hello"
 
 
@@ -1712,3 +1757,85 @@ class TestRequireBoto3VersionCheck:
         with patch.dict("sys.modules", {"boto3": fake_boto3}):
             result = _require_boto3()
             assert result is fake_boto3
+
+class TestImageBase64Decoding:
+    """Image data URLs must be decoded to raw bytes before passing to Converse API.
+
+    boto3 re-encodes at the wire layer, so passing the base64 string directly
+    results in double-encoding. Bedrock rejects with 'Failed to sanitize image'.
+    Ref: #33317.
+    """
+
+    def test_data_url_decoded_to_bytes(self):
+        from agent.bedrock_adapter import _convert_content_to_converse
+        import base64
+
+        # A tiny 1x1 red PNG
+        raw_png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+        )
+        data_url = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+
+        content = [{"type": "image_url", "image_url": {"url": data_url}}]
+        blocks = _convert_content_to_converse(content)
+
+        assert len(blocks) == 1
+        img_block = blocks[0]["image"]
+        assert img_block["format"] == "png"
+        # Must be raw bytes, not a base64 string
+        assert isinstance(img_block["source"]["bytes"], bytes)
+        assert img_block["source"]["bytes"] == raw_png
+
+    def test_invalid_base64_falls_back_to_encode(self):
+        from agent.bedrock_adapter import _convert_content_to_converse
+
+        data_url = "data:image/jpeg;base64,NOT_VALID_BASE64!!!"
+        content = [{"type": "image_url", "image_url": {"url": data_url}}]
+        blocks = _convert_content_to_converse(content)
+
+        # Should not crash — falls back to encoding the string as bytes
+        assert len(blocks) == 1
+        assert isinstance(blocks[0]["image"]["source"]["bytes"], bytes)
+
+
+class TestBearerTokenRoutesToConverse:
+    """Bearer Token users must go through Converse API, not AnthropicBedrock SDK.
+
+    The AnthropicBedrock SDK only supports SigV4 signing — it cannot use
+    AWS_BEARER_TOKEN_BEDROCK. Ref: #28156.
+    """
+
+    def _resolve(self, monkeypatch, *, bearer: bool):
+        import os
+
+        from hermes_cli import runtime_provider as rp
+
+        if bearer:
+            monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-bearer-token-123")
+        else:
+            monkeypatch.delenv("AWS_BEARER_TOKEN_BEDROCK", raising=False)
+        monkeypatch.setenv("AWS_DEFAULT_REGION", "us-east-1")
+        assert "AWS_BEARER_TOKEN_BEDROCK" in os.environ or not bearer
+
+        monkeypatch.setattr(
+            rp,
+            "_get_model_config",
+            lambda: {
+                "default": "us.anthropic.claude-sonnet-4-6",
+                "provider": "bedrock",
+            },
+        )
+        monkeypatch.setattr(rp, "load_config", lambda: {"bedrock": {}})
+        return rp.resolve_runtime_provider(requested="bedrock")
+
+    def test_bearer_token_forces_converse_for_claude(self, monkeypatch):
+        """Claude model + Bearer Token → bedrock_converse, not anthropic_messages."""
+        runtime = self._resolve(monkeypatch, bearer=True)
+        assert runtime["api_mode"] == "bedrock_converse"
+        assert "bedrock_anthropic" not in runtime
+
+    def test_sigv4_claude_still_uses_anthropic_bedrock_sdk(self, monkeypatch):
+        """Without a bearer token, Claude keeps the AnthropicBedrock SDK path."""
+        runtime = self._resolve(monkeypatch, bearer=False)
+        assert runtime["api_mode"] == "anthropic_messages"
+        assert runtime.get("bedrock_anthropic") is True
