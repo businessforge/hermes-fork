@@ -9,12 +9,11 @@ import pytest
 from gateway.config import GatewayConfig, Platform, PlatformConfig
 from gateway.platforms.base import (
     BasePlatformAdapter,
-    MessageEvent,
-    MessageType,
     SendResult,
     SessionSource,
     build_session_key,
 )
+from gateway.platforms.event import MessageEvent, MessageType
 from gateway.profile_routing import ProfileRoute
 from gateway.run import GatewayRunner
 
@@ -445,7 +444,6 @@ async def test_effective_mode_uses_startup_snapshot_without_rereading_config(
     def fail_config_read():
         raise AssertionError("busy-mode lookup reread config after startup")
 
-    monkeypatch.setattr(gateway_run, "_load_gateway_runtime_config", fail_config_read)
     monkeypatch.setattr(gateway_run, "_load_gateway_config", fail_config_read)
 
     assert runner._effective_busy_input_mode(source) == "steer"
